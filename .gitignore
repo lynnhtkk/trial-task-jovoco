@@ -1,0 +1,9 @@
+venv/
+
+*.db
+*.duckdb
+
+.DS_Store
+
+__pycache__/
+*.pyc
