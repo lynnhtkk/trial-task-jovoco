@@ -18,3 +18,9 @@ To provide a suitable analytical layer, the data is modeled using a Star Schema.
 * **`dim_date`**: `date` (PK), `month`, `quarter`, `year`
 
 **Modeling Notes on Data Quality:** The raw data contains inconsistencies (e.g., `orders` linking to customers via a reversed name string rather than an ID, and inconsistent date formats). The ETL pipeline will standardize these formats and perform the necessary lookups during the Silver transformation phase to ensure the Gold layer uses clean, integer-based foreign keys.
+
+---
+
+## Level 2 & 4: ETL Pipeline & Automation
+
+The ETL process is fully automated using a single Python script (`etl_pipeline.py`) that orchestrates a local **DuckDB** database. The pipeline follows the Medallion Architecture (Bronze, Silver, Gold) and is designed to be fully **idempotent**, meaning it can be run multiple times safely without duplicating data.

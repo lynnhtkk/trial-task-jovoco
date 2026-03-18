@@ -47,7 +47,7 @@ def load_bronze(con: duckdb.DuckDBPyConnection) -> None:
         count = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
         log.info("    ✓ %d rows staged", count)
 
-    log.info("=== BRONZE complete ===\n")
+    log.info("BRONZE complete\n")
 
 
 # SILVER – Cleaning & Transformation (slv schema)
@@ -201,11 +201,11 @@ def transform_silver(con: duckdb.DuckDBPyConnection) -> None:
               AND TRIM("Item") <> ''
         )
         SELECT
-            CAST(d."Item"  AS INTEGER)                        AS item_id,
-            CAST(d."Order" AS INTEGER)                        AS order_id,
+            CAST(d."Item"  AS INTEGER) AS item_id,
+            CAST(d."Order" AS INTEGER) AS order_id,
             p.product_id,
-            COALESCE(TRY_CAST(d."Qty" AS INTEGER), 1)        AS quantity,
-            TRY_CAST(d."Price" AS DOUBLE)                     AS price
+            COALESCE(TRY_CAST(d."Qty" AS INTEGER), 1) AS quantity,
+            TRY_CAST(d."Price" AS DOUBLE) AS price
         FROM deduped d
         LEFT JOIN slv.products p
                ON p.title = TRIM(d."Product")
@@ -214,24 +214,114 @@ def transform_silver(con: duckdb.DuckDBPyConnection) -> None:
     )
     log.info("    ✓ %d rows", con.execute("SELECT COUNT(*) FROM slv.order_items").fetchone()[0])
 
-    log.info("=== SILVER complete ===\n")
+    log.info("SILVER complete\n")
+
+
+# GOLD – Star Schema (gold schema)
+
+def build_gold(con: duckdb.DuckDBPyConnection) -> None:
+    """Build the star-schema analytical layer in the gold schema from Silver data."""
+    log.info("GOLD: building Star Schema")
+    con.execute("CREATE SCHEMA IF NOT EXISTS gold")
+
+    # dim_customers - direct projection
+    log.info("  Building gold.dim_customers …")
+    con.execute("DROP TABLE IF EXISTS gold.dim_customers")
+    con.execute(
+        """
+        CREATE TABLE gold.dim_customers AS
+        SELECT customer_id, name, city, registration_date, type
+        FROM slv.customers
+        """
+    )
+    log.info("    ✓ %d rows", con.execute("SELECT COUNT(*) FROM gold.dim_customers").fetchone()[0])
+
+    # dim_products - direct projection
+    log.info("  Building gold.dim_products …")
+    con.execute("DROP TABLE IF EXISTS gold.dim_products")
+    con.execute(
+        """
+        CREATE TABLE gold.dim_products AS
+        SELECT product_id, title, category, cost
+        FROM slv.products
+        """
+    )
+    log.info("    ✓ %d rows", con.execute("SELECT COUNT(*) FROM gold.dim_products").fetchone()[0])
+
+    # dim_stores - direct projection
+    log.info("  Building gold.dim_stores …")
+    con.execute("DROP TABLE IF EXISTS gold.dim_stores")
+    con.execute(
+        """
+        CREATE TABLE gold.dim_stores AS
+        SELECT store_id, title, city, region
+        FROM slv.stores
+        """
+    )
+    log.info("    ✓ %d rows", con.execute("SELECT COUNT(*) FROM gold.dim_stores").fetchone()[0])
+
+    # fact_sales 
+    log.info("  Building gold.fact_sales …")
+    con.execute("DROP TABLE IF EXISTS gold.fact_sales")
+    con.execute(
+        """
+        CREATE TABLE gold.fact_sales AS
+        SELECT
+            oi.item_id,
+            o.order_id,
+            o.customer_id,
+            oi.product_id,
+            o.store_id,
+            o.order_date AS date,
+            oi.quantity,
+            oi.price,
+            ROUND(oi.quantity * oi.price, 2) AS revenue
+        FROM slv.order_items oi
+        JOIN slv.orders o ON o.order_id = oi.order_id
+        """
+    )
+    log.info("    ✓ %d rows", con.execute("SELECT COUNT(*) FROM gold.fact_sales").fetchone()[0])
+
+    # dim_date – derived inline from the distinct dates in fact_sales
+    log.info("  Building gold.dim_date …")
+    con.execute("DROP TABLE IF EXISTS gold.dim_date")
+    con.execute(
+        """
+        CREATE TABLE gold.dim_date AS
+        SELECT DISTINCT
+            date,
+            MONTH(date)    AS month,
+            QUARTER(date)  AS quarter,
+            YEAR(date)     AS year
+        FROM gold.fact_sales
+        WHERE date IS NOT NULL
+        ORDER BY date
+        """
+    )
+    log.info("    ✓ %d rows", con.execute("SELECT COUNT(*) FROM gold.dim_date").fetchone()[0])
+
+    log.info("GOLD complete\n")
 
 
 # Pipeline orchestration
 
 def run_pipeline() -> None:
-    """Execute the Bronze ingestion pipeline in a single connection."""
+    """Execute the full Bronze → Silver → Gold pipeline in a single connection."""
     log.info("Starting ETL pipeline  |  DB: %s", DB_PATH)
     log.info("-" * 60)
 
     try:
         con = duckdb.connect(str(DB_PATH))
 
-        # ---------- Bronze ----------
-        load_bronze(con)
+        with con:
+            # BRONZE
+            load_bronze(con)
 
-        # ---------- Silver ----------
-        transform_silver(con)
+            # SILVER
+            transform_silver(con)
+
+            # GOLD
+            build_gold(con)
 
         con.close()
         log.info("Pipeline finished successfully ✓")
